@@ -25,16 +25,25 @@ except KeyError as e:
     print(f"❌ ENV eksik: {e}. Lütfen API_ID / API_HASH / SESSION_STRING tanımlayın.", flush=True)
     raise SystemExit(1)
 
-# === CHANNEL MAP (source channel ID -> target channel ID) ===
+# === CHANNEL MAP (source -> target) ===
 channel_map = {
-    -1001559069277: -1001458452380,  # CG Listing Alert -> hedef kanal ID
-    -1002767464580: -1001458452380   # New Channel -> aynı hedef
+    -1001559069277: -1001458452380,  # CG Listing Alert -> hedef kanal
+    -1002767464580: -1001458452380,  # New Channel -> aynı hedef
+    -1001292331458: -1001095707884   # CMC Channel -> yeni hedef
 }
 
-# === IMAGE MAP ===
+# === IMAGE MAP (kanal -> fallback görsel) ===
 channel_image_map = {
     -1001559069277: 'cg.jpg',
-    -1002767464580: 'cg.jpg'
+    -1002767464580: 'cg.jpg',
+    -1001292331458: 'cmc.jpg'
+}
+
+# === SOURCE NAME MAP (başlık için) ===
+channel_source_name_map = {
+    -1001559069277: "CoinGecko",
+    -1002767464580: "CoinGecko",
+    -1001292331458: "CoinMarketCap"
 }
 
 # === EXTRACT FIELDS FROM MESSAGE ===
@@ -100,8 +109,19 @@ def get_fast_trade_link(chain: str):
     return None
 
 # === BUILD MESSAGE ===
-def build_message(fields, dex):
-    if dex:
+def build_message(fields, dex, origin_id):
+    source_name = channel_source_name_map.get(origin_id, "Unknown Source")
+    symbol = fields["symbol"]
+    swap_link = get_fast_trade_link(fields["chain"])
+
+    msg = f"<b>🚨 New Listing Alert — ${symbol} listed on {source_name}</b>\n\n"
+    msg += f"⛓️ <b>Chain:</b> {fields['chain']}\n"
+    msg += f"🔗 <b>Contract:</b> <code>{fields['contract']}</code>\n\n"
+
+    if swap_link:
+        msg += f"⚡ <b>Fast Trade:</b> {swap_link}\n"
+
+    if dex:  # ✅ DEX datası varsa market bilgilerini ekle
         price = float(dex.get("priceUsd", 0) or 0)
         liquidity = float((dex.get("liquidity") or {}).get("usd", 0) or 0)
         mcap = dex.get("marketCap") or dex.get("fdv") or 0
@@ -109,33 +129,20 @@ def build_message(fields, dex):
         h1  = float(pc.get("h1", 0) or 0)
         h6  = float(pc.get("h6", 0) or 0)
         h24 = float(pc.get("h24", 0) or 0)
-    else:
-        price = liquidity = mcap = None
-        h1 = h6 = h24 = None
 
-    symbol = fields["symbol"]
-    swap_link = get_fast_trade_link(fields["chain"])
-
-    msg = f"<b>🚨 New Listing Alert — ${symbol} listed on CoinGecko</b>\n\n"
-    msg += f"⛓️ <b>Chain:</b> {fields['chain']}\n"
-    msg += f"🔗 <b>Contract:</b> <code>{fields['contract']}</code>\n\n"
-
-    if swap_link:
-        msg += f"⚡ <b>Fast Trade:</b> {swap_link}\n"
-
-    msg += f"\n💵 <b>Market Cap:</b> {format_dollar(mcap)}"
-    msg += f"\n💰 <b>Price:</b> {format_dollar(price)}"
-    msg += f"\n💧 <b>Liquidity:</b> {format_dollar(liquidity)}"
-    msg += f"\n📊 <b>1h:</b> {format_change(h1)}"
-    msg += f"\n🕕 <b>6h:</b> {format_change(h6)}"
-    msg += f"\n🕒 <b>24h:</b> {format_change(h24)}"
+        msg += f"\n💵 <b>Market Cap:</b> {format_dollar(mcap)}"
+        msg += f"\n💰 <b>Price:</b> {format_dollar(price)}"
+        msg += f"\n💧 <b>Liquidity:</b> {format_dollar(liquidity)}"
+        msg += f"\n📊 <b>1h:</b> {format_change(h1)}"
+        msg += f"\n🕕 <b>6h:</b> {format_change(h6)}"
+        msg += f"\n🕒 <b>24h:</b> {format_change(h24)}"
 
     if fields.get("chat"):
         msg += f"\n\n💬 <b>Chat:</b> {fields['chat']}"
 
     return msg
 
-# === TELEGRAM CLIENT (StringSession ile dosyasız) ===
+# === TELEGRAM CLIENT ===
 client = TelegramClient(StringSession(session_string), api_id, api_hash)
 
 @client.on(events.NewMessage(chats=list(channel_map.keys())))
@@ -160,11 +167,11 @@ async def handler(event):
 
         dex = get_dex_data(fields["contract"])
         if not dex:
-            print("[LOG] No DEX data found. Using only extracted message fields.", flush=True)
+            print("[LOG] No DEX data found, posting without market info.", flush=True)
 
-        msg = build_message(fields, dex)
+        msg = build_message(fields, dex, origin_id)
 
-        # Header görseli varsa indir; yoksa cg.jpg kullan
+        # Header görseli varsa indir; yoksa fallback
         if dex and (dex.get("info") or {}).get("header"):
             header_url = dex["info"]["header"]
             print(f"[LOG] Downloading header image: {header_url}", flush=True)
@@ -175,7 +182,7 @@ async def handler(event):
                         f.write(res.content)
                     image_path = "header_temp.jpg"
                 else:
-                    print(f"[LOG] Header indirilemedi (HTTP {res.status_code}), cg.jpg kullanılacak.", flush=True)
+                    print(f"[LOG] Header indirilemedi (HTTP {res.status_code}), fallback kullanılacak.", flush=True)
             except Exception as e:
                 print(f"[Image fallback] Header download failed: {e}", flush=True)
 
@@ -199,7 +206,7 @@ async def handler(event):
 if __name__ == "__main__":
     while True:
         try:
-            print("🚀 CG Bot is running...", flush=True)
+            print("🚀 CG/CMC Bot is running...", flush=True)
             client.start()
             client.run_until_disconnected()
         except Exception as e:
